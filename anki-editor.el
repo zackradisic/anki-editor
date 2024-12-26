@@ -58,6 +58,11 @@
 (require 'ox)
 (require 'ox-html)
 
+
+(defcustom anki-editor-base-tags
+  nil
+  "The base tags to add to each card.")
+
 ;; check if we run on emacs 27 or higher (emacs-version)
 (if (< emacs-major-version 27)
     (require 'subr-x))
@@ -101,7 +106,7 @@ Useful for special tags like `marked' and `leech'."
 (defcustom anki-editor-latex-style 'builtin
   "The style of latex to translate into."
   :type '(radio (const :tag "Built-in" builtin)
-                (const :tag "MathJax" mathjax)))
+          (const :tag "MathJax" mathjax)))
 
 (defcustom anki-editor-include-default-style t
   "Whether to include the default style with `anki-editor-copy-styles'.
@@ -165,7 +170,7 @@ will be exported as
 This option only has an effect if `anki-editor-latex-style' is set to
 use Anki's builtin LaTeX support."
   :type '(choice (string :tag "Use this string for the class' name.")
-                 (const :tag "Do not create an extra div for display math." nil)))
+          (const :tag "Do not create an extra div for display math." nil)))
 
 (defcustom anki-editor-swap-two-fields nil
   "For note types in this list, swap fields
@@ -845,7 +850,7 @@ and else from variable `anki-editor-prepend-heading'."
                nil
                anki-editor-prop-tags)))
     (when anki-editor-org-tags-as-anki-tags
-      (setq tags (append tags (mapcar #'substring-no-properties (org-get-tags)))))
+      (setq tags (append tags (mapcar #'substring-no-properties (org-get-tags)) anki-editor-base-tags)))
 
     ;; Filtering out empty tags produces by org-mode coming with emacs 26
     (cl-loop for tag in tags
