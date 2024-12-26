@@ -538,8 +538,15 @@ The implementation is borrowed and simplified from ox-html."
 (defconst anki-editor-prop-swap-two-fields "ANKI_SWAP_TWO_FIELDS")
 (defconst anki-editor-org-tag-regexp "^\\([[:alnum:]_@#%]+\\)+$")
 
+;; If this property is present, anki-editor will also push
+;; a reversed card.
+;;
+;; The property will be updated with the ID of the reversed
+;; card.
+(defconst anki-editor-prop-add-reversed "ANKI_REVERSED")
+
 (cl-defstruct anki-editor-note
-  id model deck fields tags)
+  id model deck fields tags reversed-id)
 
 (defvar anki-editor--collection-data-updated nil
   "Whether or not collection data is updated from Anki.
@@ -637,13 +644,30 @@ see `anki-editor-insert-note' which wraps this function."
    ((null (anki-editor-note-id note))
     (anki-editor--create-note note))
    (t
-    (anki-editor--update-note note))))
+    (progn
+      (let* ((reversed-id (anki-editor-note-reversed-id note)))
+        (when (stringp reversed-id)
+          (if (string= reversed-id "-1")
+              (anki-editor--create-reversed-note (anki-editor--reverse-note note))
+            (anki-editor--update-note (anki-editor--reverse-note note)))))
+      (anki-editor--update-note note)))))
 
 (defun anki-editor--set-note-id (id)
   "Set note-id of anki-editor note at point to ID."
   (unless id
     (error "Note creation failed for unknown reason"))
   (org-set-property anki-editor-prop-note-id (number-to-string id)))
+
+(defun anki-editor--set-reversed-note-id (id)
+  "Set the reversed note of ID of anki-editor note at point."
+  (unless id
+    (error "Setting note reversed id failed for unknown reason"))
+  (org-set-property anki-editor-prop-add-reversed (number-to-string id)))
+
+(defun anki-editor--after-create-note (note id)
+  "Run after creation of NOTE with new ID."
+  (anki-editor--set-note-id id)
+  (anki-editor--create-reversed-note (anki-editor--reverse-note note)))
 
 (defun anki-editor--create-note (note)
   "Request AnkiConnect for creating NOTE."
@@ -654,7 +678,18 @@ see `anki-editor-insert-note' which wraps this function."
      (anki-editor-api-enqueue 'addNote
                               :note (anki-editor-api--note note)))
     (nth 1)
-    (anki-editor--set-note-id)))
+    (anki-editor--after-create-note note)))
+
+(defun anki-editor--create-reversed-note (note)
+  "Request AnkiConnect for creating NOTE."
+  (thread-last
+    (anki-editor-api-with-multi
+     (anki-editor-api-enqueue 'createDeck
+                              :deck (anki-editor-note-deck note))
+     (anki-editor-api-enqueue 'addNote
+                              :note (anki-editor-api--note note)))
+    (nth 1)
+    (anki-editor--set-reversed-note-id)))
 
 (defun anki-editor--update-note (note)
   "Request AnkiConnect for updating fields, deck, and tags of NOTE."
@@ -831,9 +866,12 @@ and else from variable `anki-editor-prepend-heading'."
                                      (car x)
                                      (anki-editor--export-string (cdr x)
                                                                  format)))
-                                  fields)))
+                                  fields))
+         (reversed-id (org-entry-get nil anki-editor-prop-add-reversed)))
     (unless deck (user-error "Missing deck"))
     (unless note-type (user-error "Missing note type"))
+    (when (and (stringp reversed-id) (= (length reversed-id) 0))
+      (setq reversed-id "-1"))
 
     ;; Sorting fields not necessary for Anki, but it removes
     ;; randomness which breaks our tests.
@@ -842,7 +880,26 @@ and else from variable `anki-editor-prepend-heading'."
                            :model note-type
                            :deck deck
                            :tags tags
-                           :fields exported-fields)))
+                           :fields exported-fields
+                           :reversed-id reversed-id)))
+
+(defun anki-editor--reverse-note (note)
+  "Make a NOTE with its front and back reversed."
+  (let* ((note-id (anki-editor-note-reversed-id note))
+         (note-type (anki-editor-note-model note))
+         (deck (anki-editor-note-deck note))
+         (tags (anki-editor-note-tags note))
+         (fields (anki-editor-note-fields note))
+         (front-content (cdr (assoc "Front" fields)))
+         (back-content (cdr (assoc "Back" fields)))
+         (reversed-fields (list (cons "Front" back-content)
+                                (cons "Back" front-content))))
+    (make-anki-editor-note :id note-id
+                           :model note-type
+                           :deck deck
+                           :tags tags
+                           :fields reversed-fields
+                           :reversed-id nil)))
 
 (defun anki-editor--get-tags ()
   "Return list of tags of org entry at point."
@@ -967,106 +1024,106 @@ When the `subheading-fields' don't match the `note-type's fields,
 map missing fields to the `heading' and/or `content-before-subheading'.
 Return a list of cons of (FIELD-NAME . FIELD-CONTENT)."
   (anki-editor--with-collection-data-updated
-   (let* ((model-fields (alist-get
-                         note-type anki-editor--model-fields
-                         nil nil #'string=))
-          (field-alias (alist-get note-type anki-editor-field-alias
-                                  nil nil #'string=))
-          (property-fields (anki-editor--property-fields model-fields))
-          (named-fields (seq-uniq
-                         (append property-fields
-                                 (mapcar
-                                  (lambda (field)
-                                    (let ((aliased (alist-get (car field) field-alias
-                                                              nil nil #'string=)))
-                                      (cond
-                                       (aliased `(,aliased . ,(cdr field)))
-                                       (t field))))
-                                  subheading-fields))
-                         (lambda (left right)
-                           (string= (car left) (car right)))))
-          (fields-matching (cl-intersection
+    (let* ((model-fields (alist-get
+                          note-type anki-editor--model-fields
+                          nil nil #'string=))
+           (field-alias (alist-get note-type anki-editor-field-alias
+                                   nil nil #'string=))
+           (property-fields (anki-editor--property-fields model-fields))
+           (named-fields (seq-uniq
+                          (append property-fields
+                                  (mapcar
+                                   (lambda (field)
+                                     (let ((aliased (alist-get (car field) field-alias
+                                                               nil nil #'string=)))
+                                       (cond
+                                        (aliased `(,aliased . ,(cdr field)))
+                                        (t field))))
+                                   subheading-fields))
+                          (lambda (left right)
+                            (string= (car left) (car right)))))
+           (fields-matching (cl-intersection
+                             model-fields (mapcar #'car named-fields)
+                             :test #'string=))
+           (fields-missing (cl-set-difference
                             model-fields (mapcar #'car named-fields)
                             :test #'string=))
-          (fields-missing (cl-set-difference
-                           model-fields (mapcar #'car named-fields)
-                           :test #'string=))
-          (fields-extra (cl-set-difference
-                         (mapcar #'car named-fields) model-fields
-                         :test #'string=))
-          (fields (cl-loop for f in fields-matching
-                           collect (cons f (alist-get
-                                            f named-fields
-                                            nil nil #'string=))))
-          (heading-format anki-editor-prepend-heading-format))
-     (cond ((equal 0 (length fields-missing))
-            (when (< 0 (length fields-extra))
-              (user-error "Failed to map all named fields")))
-           ((equal 1 (length fields-missing))
-            (if (equal 0 (length fields-extra))
-                (if (equal "" (string-trim content-before-subheading))
-                    (push (cons (car fields-missing) heading)
-                          fields)
-                  (if prepend-heading
-                      (push (cons (car fields-missing)
-                                  (concat
-                                   (format heading-format heading)
-                                   content-before-subheading))
-                            fields)
-                    (push (cons (car fields-missing)
-                                content-before-subheading)
-                          fields)))
-              (if (equal "" (string-trim content-before-subheading))
-                  (push (cons (car fields-missing)
-                              (anki-editor--concat-fields
-                               fields-extra subheading-fields level))
-                        fields)
-                (if prepend-heading
-                    (push (cons (car fields-missing)
-                                (concat
-                                 (format heading-format heading)
-                                 content-before-subheading
+           (fields-extra (cl-set-difference
+                          (mapcar #'car named-fields) model-fields
+                          :test #'string=))
+           (fields (cl-loop for f in fields-matching
+                            collect (cons f (alist-get
+                                             f named-fields
+                                             nil nil #'string=))))
+           (heading-format anki-editor-prepend-heading-format))
+      (cond ((equal 0 (length fields-missing))
+             (when (< 0 (length fields-extra))
+               (user-error "Failed to map all named fields")))
+            ((equal 1 (length fields-missing))
+             (if (equal 0 (length fields-extra))
+                 (if (equal "" (string-trim content-before-subheading))
+                     (push (cons (car fields-missing) heading)
+                           fields)
+                   (if prepend-heading
+                       (push (cons (car fields-missing)
+                                   (concat
+                                    (format heading-format heading)
+                                    content-before-subheading))
+                             fields)
+                     (push (cons (car fields-missing)
+                                 content-before-subheading)
+                           fields)))
+               (if (equal "" (string-trim content-before-subheading))
+                   (push (cons (car fields-missing)
+                               (anki-editor--concat-fields
+                                fields-extra subheading-fields level))
+                         fields)
+                 (if prepend-heading
+                     (push (cons (car fields-missing)
+                                 (concat
+                                  (format heading-format heading)
+                                  content-before-subheading
+                                  (anki-editor--concat-fields
+                                   fields-extra subheading-fields
+                                   level)))
+                           fields)
+                   (push (cons (car fields-missing)
+                               (concat content-before-subheading
+                                       (anki-editor--concat-fields
+                                        fields-extra subheading-fields
+                                        level)))
+                         fields)))))
+            ((equal 2 (length fields-missing))
+             (if (equal 0 (length fields-extra))
+                 (progn
+                   (push (cons (nth (- 1 field-swap) fields-missing)
+                               content-before-subheading)
+                         fields)
+                   (push (cons (nth (- field-swap 0) fields-missing)
+                               heading)
+                         fields))
+               (if (equal "" (string-trim content-before-subheading))
+                   (progn
+                     (push (cons (nth (- 1 field-swap) fields-missing)
                                  (anki-editor--concat-fields
-                                  fields-extra subheading-fields
-                                  level)))
-                          fields)
-                  (push (cons (car fields-missing)
-                              (concat content-before-subheading
-                                      (anki-editor--concat-fields
-                                       fields-extra subheading-fields
-                                       level)))
-                        fields)))))
-           ((equal 2 (length fields-missing))
-            (if (equal 0 (length fields-extra))
-                (progn
-                  (push (cons (nth (- 1 field-swap) fields-missing)
-                              content-before-subheading)
-                        fields)
-                  (push (cons (nth (- field-swap 0) fields-missing)
-                              heading)
-                        fields))
-              (if (equal "" (string-trim content-before-subheading))
-                  (progn
-                    (push (cons (nth (- 1 field-swap) fields-missing)
-                                (anki-editor--concat-fields
-                                 fields-extra subheading-fields level))
-                          fields)
-                    (push (cons (nth (- field-swap 0) fields-missing)
-                                heading)
-                          fields))
-                (progn
-                  (push (cons (nth (- 1 field-swap) fields-missing)
-                              (concat content-before-subheading
-                                      (anki-editor--concat-fields
-                                       fields-extra subheading-fields level)))
-                        fields)
-                  (push (cons (nth (- field-swap 0) fields-missing)
-                              heading)
-                        fields)))))
-           ((< 2 (length fields-missing))
-            (user-error (concat "Cannot map note fields: "
-                                "more than two fields missing"))))
-     fields)))
+                                  fields-extra subheading-fields level))
+                           fields)
+                     (push (cons (nth (- field-swap 0) fields-missing)
+                                 heading)
+                           fields))
+                 (progn
+                   (push (cons (nth (- 1 field-swap) fields-missing)
+                               (concat content-before-subheading
+                                       (anki-editor--concat-fields
+                                        fields-extra subheading-fields level)))
+                         fields)
+                   (push (cons (nth (- field-swap 0) fields-missing)
+                               heading)
+                         fields)))))
+            ((< 2 (length fields-missing))
+             (user-error (concat "Cannot map note fields: "
+                                 "more than two fields missing"))))
+      fields)))
 
 (defun anki-editor--concat-fields (field-names field-alist level)
   "Concat field names and content of fields in list `field-names'."
@@ -1174,36 +1231,36 @@ of that heading."
               (failed 0))
           (save-excursion
             (anki-editor--with-collection-data-updated
-             (cl-loop with bar-width = 30
-                      for marker in anki-editor--note-markers
-                      for progress = (/ (float (cl-incf count))
-                                        (length anki-editor--note-markers))
-                      do
-                      (goto-char marker)
-                      (message
-                       "Uploading notes in buffer %s%s [%s%s] %d/%d (%.2f%%)"
-                       (marker-buffer marker)
-                       (if (zerop failed)
-                           ""
-                         (propertize (format " %d failed" failed)
-                                     'face `(:foreground "red")))
-                       (make-string (truncate (* bar-width progress))
-                                    ?#)
-                       (make-string (- bar-width
-                                       (truncate (* bar-width
-                                                    progress)))
-                                    ?.)
-                       count
-                       (length anki-editor--note-markers)
-                       (* 100 progress))
-                      (anki-editor--clear-failure-reason)
-                      (condition-case-unless-debug err
-                          (anki-editor--push-note (anki-editor-note-at-point))
-                        (error (cl-incf failed)
-                               (anki-editor--set-failure-reason
-                                (error-message-string err))))
-                      ;; free marker
-                      (set-marker marker nil))))
+              (cl-loop with bar-width = 30
+                       for marker in anki-editor--note-markers
+                       for progress = (/ (float (cl-incf count))
+                                         (length anki-editor--note-markers))
+                       do
+                       (goto-char marker)
+                       (message
+                        "Uploading notes in buffer %s%s [%s%s] %d/%d (%.2f%%)"
+                        (marker-buffer marker)
+                        (if (zerop failed)
+                            ""
+                          (propertize (format " %d failed" failed)
+                                      'face `(:foreground "red")))
+                        (make-string (truncate (* bar-width progress))
+                                     ?#)
+                        (make-string (- bar-width
+                                        (truncate (* bar-width
+                                                     progress)))
+                                     ?.)
+                        count
+                        (length anki-editor--note-markers)
+                        (* 100 progress))
+                       (anki-editor--clear-failure-reason)
+                       (condition-case-unless-debug err
+                           (anki-editor--push-note (anki-editor-note-at-point))
+                         (error (cl-incf failed)
+                                (anki-editor--set-failure-reason
+                                 (error-message-string err))))
+                       ;; free marker
+                       (set-marker marker nil))))
           (message
            (cond
             ((zerop (length anki-editor--note-markers))
