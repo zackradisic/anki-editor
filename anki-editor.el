@@ -1222,6 +1222,7 @@ of that heading."
                       ((equal current-prefix-arg '(16)) 'file)
                       ((equal current-prefix-arg '(64)) 'agenda)
                       (t nil))))
+  (if (not anki-editor-mode) (error "Must be in anki-editor-mode"))
   (unwind-protect
       (progn
         (apply #'anki-editor-map-note-entries
